@@ -16,7 +16,7 @@ class AgentState(TypedDict):
 
 # Define the model selector
 def get_model():
-    use_mock = os.environ.get("USE_MOCK_LLM", "false").lower() == "true"
+    use_mock = True # os.environ.get("USE_MOCK_LLM", "false").lower() == "true"
     tools = get_tools()
 
     if use_mock:
