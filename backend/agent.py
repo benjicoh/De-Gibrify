@@ -2,9 +2,8 @@ from typing import TypedDict, Annotated, Sequence, Union, Optional
 import operator
 import os
 
-from langchain_core.messages import BaseMessage, HumanMessage
-from langchain_core.agents import AgentAction, AgentFinish
-from langgraph.graph import StateGraph, END
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
@@ -53,7 +52,7 @@ def create_agent_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     workflow.add_node("agent", call_model)
     workflow.add_node("tools", tool_node)
 
-    workflow.set_entry_point("agent")
+    workflow.add_edge(START, "agent")
 
     workflow.add_conditional_edges(
         "agent",
