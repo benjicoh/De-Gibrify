@@ -156,13 +156,56 @@ async def get_thread_state(thread_id: str):
             "next": state.next,
             "metadata": state.metadata,
             "config": state.config,
-            "created_at": "2024-01-01T00:00:00Z",
-            "parent_config": state.parent_config
+            "created_at": state.created_at or "2024-01-01T00:00:00Z",
+            "parent_config": state.parent_config,
+            "checkpoint_id": state.config.get("configurable", {}).get("checkpoint_id")
         }
     except Exception:
         # If no state, return empty or 404.
         # LangGraph Cloud might expect empty values if thread exists but no run yet.
-        return {"values": {}, "next": [], "metadata": {}}
+        return {"values": {}, "next": [], "metadata": {}, "config": {}, "checkpoint_id": None}
+
+class ThreadSearchRequest(BaseModel):
+    metadata: Optional[Dict] = {}
+    limit: int = 10
+    offset: int = 0
+    status: Optional[str] = None
+    values: Optional[Dict] = None
+
+@app.post("/threads/search")
+async def search_threads(request: ThreadSearchRequest):
+    logger.info(f"POST /threads/search called {request}")
+    # Return empty list as we don't have persistent storage search implemented
+    return []
+
+class ThreadHistoryRequest(BaseModel):
+    limit: int = 10
+    before: Optional[str] = None
+    metadata: Optional[Dict] = {}
+
+@app.post("/threads/{thread_id}/history")
+async def get_thread_history(thread_id: str, request: ThreadHistoryRequest):
+    logger.info(f"POST /threads/{thread_id}/history called {request}")
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        history = []
+        # agent_graph.get_state_history returns an iterator of StateSnapshot
+        for state in agent_graph.get_state_history(cast(Any, config)):
+            history.append({
+                "values": state.values,
+                "next": state.next,
+                "metadata": state.metadata,
+                "config": state.config,
+                "created_at": state.created_at or "2024-01-01T00:00:00Z",
+                "parent_config": state.parent_config,
+                "checkpoint_id": state.config.get("configurable", {}).get("checkpoint_id")
+            })
+            if len(history) >= request.limit:
+                break
+        return history
+    except Exception as e:
+        logger.error(f"Error fetching history for {thread_id}: {e}")
+        return []
 
 class RunCreate(BaseModel):
     assistant_id: str
@@ -180,29 +223,25 @@ async def stream_run(thread_id: str, run: RunCreate):
 
     stream_modes = run.stream_mode or ["values"]
 
+    def _serialize(obj):
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump()
+        if hasattr(obj, "dict"):
+            return obj.dict()
+        return str(obj)
+
     async def event_generator():
         try:
-            # We prioritize "values" stream mode as it is the most stable for our custom server
-            if "values" in stream_modes:
-                async for chunk in agent_graph.astream(input_data, cast(Any, config), stream_mode="values"):
-                    # chunk is the state
-                    logger.debug(f"stream chunk: {str(chunk)[:200]}")
-                    yield f"event: values\ndata: {json.dumps(chunk, default=str)}\n\n"
-            else:
-                 # Fallback to events or custom stream
-                 async for event in agent_graph.astream_events(input_data, cast(Any, config), version="v1"):
-                    kind = event.get("event")
-                    if kind == "on_chat_model_stream":
-                        chunk = event.get("data", {}).get("chunk")
-                        if chunk is None:
-                            c_dict = {"content": ""}
-                        elif hasattr(chunk, "dict"):
-                            c_dict = chunk.dict()
-                        else:
-                            c_dict = {"content": str(getattr(chunk, 'content', ''))}
-
-                        logger.debug(f"stream event partial: {str(c_dict)[:200]}")
-                        yield f"event: messages/partial\ndata: {json.dumps([c_dict], default=str)}\n\n"
+            # We assume agent_graph.astream handles the list of stream_modes
+            async for mode, chunk in agent_graph.astream(input_data, cast(Any, config), stream_mode=stream_modes):
+                if mode == "values":
+                    yield f"event: values\ndata: {json.dumps(chunk, default=_serialize)}\n\n"
+                elif mode == "messages-tuple":
+                    yield f"event: messages\ndata: {json.dumps(chunk, default=_serialize)}\n\n"
+                elif mode == "custom":
+                     yield f"event: custom\ndata: {json.dumps(chunk, default=_serialize)}\n\n"
+                else:
+                     yield f"event: {mode}\ndata: {json.dumps(chunk, default=_serialize)}\n\n"
 
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
