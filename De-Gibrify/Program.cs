@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.IO;
 
 namespace De_Gibrify
 {
@@ -25,22 +26,43 @@ namespace De_Gibrify
         private NotifyIcon? _notifyIcon;
         private HiddenWindow? _window;
 
-        // Hotkey constants
-        private const int MOD_ALT = 0x0001;
-        private const int VK_F10 = 0x79;
-        private const int HOTKEY_ID = 9000;
+        // Hotkey constants (kept for fallback)
+        private const int MOD_ALT =0x0001;
+        private const int VK_F10 =0x79;
+        private const int HOTKEY_ID =9000;
+
+        private HotkeyConfig _hotkeyConfig = new HotkeyConfig();
 
         public DeGibrifyApplicationContext()
         {
+            _hotkeyConfig = HotkeyConfig.LoadOrCreateDefault();
             SetupTrayIcon();
             RegisterGlobalHotKey();
         }
 
         private void SetupTrayIcon()
         {
+            Icon iconToUse;
+            string icoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Gibbrish.ico");
+            try
+            {
+                if (File.Exists(icoPath))
+                {
+                    iconToUse = new Icon(icoPath);
+                }
+                else
+                {
+                    iconToUse = SystemIcons.Application;
+                }
+            }
+            catch
+            {
+                iconToUse = SystemIcons.Application;
+            }
+
             _notifyIcon = new NotifyIcon
             {
-                Icon = SystemIcons.WinLogo, // Use a standard system icon
+                Icon = iconToUse,
                 Text = "De-Gibrify",
                 Visible = true
             };
@@ -53,16 +75,32 @@ namespace De_Gibrify
         private void RegisterGlobalHotKey()
         {
             _window = new HiddenWindow(this);
-            // Register Alt + F10
-            if (!NativeMethods.RegisterHotKey(_window.Handle, HOTKEY_ID, MOD_ALT, VK_F10))
+
+            int modifiers = _hotkeyConfig?.GetModifierMask() ?? MOD_ALT;
+            int vk = _hotkeyConfig?.GetVirtualKey() ?? VK_F10;
+
+            // Register hotkey from config
+            if (!NativeMethods.RegisterHotKey(_window.Handle, HOTKEY_ID, modifiers, vk))
             {
-                MessageBox.Show("Could not register hotkey Alt+F10. It might be in use.", "De-Gibrify Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Could not register hotkey {_hotkeyConfig.Key} with modifiers {string.Join(",", _hotkeyConfig.Modifiers)}. It might be in use.", "De-Gibrify Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+                // Try fallback to Alt+F10
+                if (!NativeMethods.RegisterHotKey(_window.Handle, HOTKEY_ID, MOD_ALT, VK_F10))
+                {
+                    MessageBox.Show("Could not register fallback hotkey Alt+F10.", "De-Gibrify Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
         private void Exit(object? sender, EventArgs e)
         {
-            _notifyIcon!.Visible = false;
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = false;
+                _notifyIcon.Dispose();
+                _notifyIcon = null;
+            }
+
             if (_window != null)
             {
                 NativeMethods.UnregisterHotKey(_window.Handle, HOTKEY_ID);
@@ -71,20 +109,20 @@ namespace De_Gibrify
             Application.Exit();
         }
 
-        public void HandleHotKey()
+        public async Task HandleHotKey()
         {
-            // 0. Prepare for Clipboard Race Condition
+            //0. Prepare for Clipboard Race Condition
             uint startSequence = ClipboardHelper.GetSequenceNumber();
 
-            // 1. Simulate Ctrl+X to cut text
+            //1. Simulate Ctrl+X to cut text
             SendCtrlX();
 
-            // 2. Wait for Clipboard to update (Wait for the App to actually write the data)
+            //2. Wait for Clipboard to update (Wait for the App to actually write the data)
             // This fixes the issue where we read too early.
             // If it times out, we assume the cut failed or no selection, but we still try to read once.
             ClipboardHelper.WaitForClipboardUpdate(startSequence);
 
-            // 3. Read from Clipboard using robust retry mechanism
+            //3. Read from Clipboard using robust retry mechanism
             string? originalText = ClipboardHelper.GetText();
             if (string.IsNullOrEmpty(originalText))
             {
@@ -92,7 +130,7 @@ namespace De_Gibrify
                 return;
             }
 
-            // 4. Synchronize Input with Foreground Window
+            //4. Synchronize Input with Foreground Window
             IntPtr hwndForeground = NativeMethods.GetForegroundWindow();
             uint idThreadForeground = NativeMethods.GetWindowThreadProcessId(hwndForeground, out _);
             uint idThreadSelf = NativeMethods.GetCurrentThreadId();
@@ -108,21 +146,13 @@ namespace De_Gibrify
                     attached = NativeMethods.AttachThreadInput(idThreadSelf, idThreadForeground, true);
                 }
 
-                // Now GetKeyboardLayout(0) returns the layout of the *active* thread (which we are attached to)
-                currentLayout = NativeMethods.GetKeyboardLayout(0);
+                currentLayout = NativeMethods.GetKeyboardLayout(idThreadForeground);
+                Debug.WriteLine($"Current Layout: 0x{currentLayout.ToInt64():X}");
 
-                // Determine Next Layout
-                nextLayout = GetNextKeyboardLayout(currentLayout);
-
-                if (nextLayout == currentLayout)
-                {
-                    // No other layout to switch to. Abort?
-                    // We might still want to transform if the user expects it, but usually this means single language.
-                    return;
-                }
-
-                // Switch System Layout for the foreground window immediately (since we are attached)
-                NativeMethods.ActivateKeyboardLayout(nextLayout, 0);
+                SendWinSpace();
+                await Task.Delay(500);
+                nextLayout = NativeMethods.GetKeyboardLayout(idThreadForeground);
+                Debug.WriteLine($"Next Layout: 0x{nextLayout.ToInt64():X}");
             }
             finally
             {
@@ -132,13 +162,14 @@ namespace De_Gibrify
                 }
             }
 
-            // 5. Transform String
+            //5. Transform String
             // We use the layouts we found. Note: TransformString might rely on API calls.
             // Some API calls like VkKeyScanEx take a HKL. They don't depend on thread state,
             // so we can do this after detaching.
+            Debug.WriteLine($"Transforming {originalText}");
             string newText = TransformString(originalText, currentLayout, nextLayout);
-
-            // 6. Paste Transformed String
+            Debug.WriteLine($"Transformed to {newText}");
+            //6. Paste Transformed String
             if (ClipboardHelper.SetText(newText))
             {
                 SendCtrlV();
@@ -149,12 +180,12 @@ namespace De_Gibrify
         {
             // The user is likely still holding down Alt from the hotkey (Alt+F10).
             // We must explicitly release Alt (VK_MENU) before sending Ctrl+X.
-            NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, NativeMethods.KEYEVENTF_KEYUP, 0);
+            NativeMethods.keybd_event(NativeMethods.VK_MENU,0, NativeMethods.KEYEVENTF_KEYUP,0);
 
-            NativeMethods.keybd_event(NativeMethods.VK_CONTROL, 0, 0, 0); // Ctrl Down
-            NativeMethods.keybd_event((byte)Keys.X, 0, 0, 0);       // X Down
-            NativeMethods.keybd_event((byte)Keys.X, 0, NativeMethods.KEYEVENTF_KEYUP, 0); // X Up
-            NativeMethods.keybd_event(NativeMethods.VK_CONTROL, 0, NativeMethods.KEYEVENTF_KEYUP, 0); // Ctrl Up
+            NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0,0,0); // Ctrl Down
+            NativeMethods.keybd_event((byte)Keys.X,0,0,0); // X Down
+            NativeMethods.keybd_event((byte)Keys.X,0, NativeMethods.KEYEVENTF_KEYUP,0); // X Up
+            NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0, NativeMethods.KEYEVENTF_KEYUP,0); // Ctrl Up
 
             // Sleep is less critical now due to WaitForClipboardUpdate, but good for safety
             Thread.Sleep(50);
@@ -162,33 +193,20 @@ namespace De_Gibrify
 
         private void SendCtrlV()
         {
-            NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, NativeMethods.KEYEVENTF_KEYUP, 0);
-            NativeMethods.keybd_event(NativeMethods.VK_CONTROL, 0, 0, 0); // Ctrl Down
-            NativeMethods.keybd_event((byte)Keys.V, 0, 0, 0);       // V Down
-            NativeMethods.keybd_event((byte)Keys.V, 0, NativeMethods.KEYEVENTF_KEYUP, 0); // V Up
-            NativeMethods.keybd_event(NativeMethods.VK_CONTROL, 0, NativeMethods.KEYEVENTF_KEYUP, 0); // Ctrl Up
+            NativeMethods.keybd_event(NativeMethods.VK_MENU,0, NativeMethods.KEYEVENTF_KEYUP,0);
+            NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0,0,0); // Ctrl Down
+            NativeMethods.keybd_event((byte)Keys.V,0,0,0); // V Down
+            NativeMethods.keybd_event((byte)Keys.V,0, NativeMethods.KEYEVENTF_KEYUP,0); // V Up
+            NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0, NativeMethods.KEYEVENTF_KEYUP,0); // Ctrl Up
         }
 
-        private IntPtr GetNextKeyboardLayout(IntPtr currentLayout)
+        //Mimic language switch by win + space
+        private void SendWinSpace()
         {
-            int count = NativeMethods.GetKeyboardLayoutList(0, null);
-            if (count <= 0) return currentLayout;
-
-            IntPtr[] layouts = new IntPtr[count];
-            NativeMethods.GetKeyboardLayoutList(count, layouts);
-
-            int idx = -1;
-            for(int i=0; i<count; i++)
-            {
-                if(layouts[i] == currentLayout)
-                {
-                    idx = i;
-                    break;
-                }
-            }
-
-            if (idx == -1) return layouts[0];
-            return layouts[(idx + 1) % count];
+            NativeMethods.keybd_event((byte)Keys.LWin,0,0,0); // Win Down
+            NativeMethods.keybd_event((byte)Keys.Space,0,0,0); // Space Down
+            NativeMethods.keybd_event((byte)Keys.Space,0, NativeMethods.KEYEVENTF_KEYUP,0); // Space Up
+            NativeMethods.keybd_event((byte)Keys.LWin,0, NativeMethods.KEYEVENTF_KEYUP,0); // Win Up
         }
 
         private string TransformString(string input, IntPtr sourceLayout, IntPtr targetLayout)
@@ -206,20 +224,20 @@ namespace De_Gibrify
                     continue;
                 }
 
-                byte vk = (byte)(vkScan & 0xFF);
-                byte shiftState = (byte)((vkScan >> 8) & 0xFF);
+                byte vk = (byte)(vkScan &0xFF);
+                byte shiftState = (byte)((vkScan >>8) &0xFF);
 
-                Array.Clear(keyState, 0, 256);
-                if ((shiftState & 1) != 0) keyState[NativeMethods.VK_SHIFT] = 0x80;
-                if ((shiftState & 2) != 0) keyState[NativeMethods.VK_CONTROL] = 0x80;
-                if ((shiftState & 4) != 0) keyState[NativeMethods.VK_MENU] = 0x80;
+                Array.Clear(keyState,0,256);
+                if ((shiftState &1) !=0) keyState[NativeMethods.VK_SHIFT] =0x80;
+                if ((shiftState &2) !=0) keyState[NativeMethods.VK_CONTROL] =0x80;
+                if ((shiftState &4) !=0) keyState[NativeMethods.VK_MENU] =0x80;
 
                 uint scanCode = NativeMethods.MapVirtualKeyEx(vk, NativeMethods.MAPVK_VK_TO_VSC, targetLayout);
 
                 charBuff.Clear();
-                int rc = NativeMethods.ToUnicodeEx(vk, scanCode, keyState, charBuff, charBuff.Capacity, 0, targetLayout);
+                int rc = NativeMethods.ToUnicodeEx(vk, scanCode, keyState, charBuff, charBuff.Capacity,0, targetLayout);
 
-                if (rc > 0)
+                if (rc >0)
                 {
                     result.Append(charBuff.ToString());
                 }
@@ -245,7 +263,11 @@ namespace De_Gibrify
             {
                 if (m.Msg == NativeMethods.WM_HOTKEY)
                 {
-                    _context.HandleHotKey();
+                    Task.Run(async () =>
+                    {
+                        await Task.Delay(250);
+                        await _context.HandleHotKey();
+                    });
                 }
                 base.WndProc(ref m);
             }
@@ -254,16 +276,16 @@ namespace De_Gibrify
 
     internal static class NativeMethods
     {
-        public const int WM_HOTKEY = 0x0312;
-        public const int WM_INPUTLANGCHANGEREQUEST = 0x0050;
+        public const int WM_HOTKEY =0x0312;
+        public const int WM_INPUTLANGCHANGEREQUEST =0x0050;
 
-        public const byte VK_SHIFT = 0x10;
-        public const byte VK_CONTROL = 0x11;
-        public const byte VK_MENU = 0x12;
-        public const byte VK_CONTROL_CONST = 0x11;
+        public const byte VK_SHIFT =0x10;
+        public const byte VK_CONTROL =0x11;
+        public const byte VK_MENU =0x12;
+        public const byte VK_CONTROL_CONST =0x11;
 
-        public const uint KEYEVENTF_KEYUP = 0x0002;
-        public const uint MAPVK_VK_TO_VSC = 0;
+        public const uint KEYEVENTF_KEYUP =0x0002;
+        public const uint MAPVK_VK_TO_VSC =0;
 
         [DllImport("user32.dll")]
         public static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
