@@ -1,4 +1,5 @@
 {
  "Key": "F10",
- "Modifiers": [ "Alt" ]
+ "Modifiers": [ "Alt" ],
+ "Languages": [ "en-US", "he-IL" ]
 }
