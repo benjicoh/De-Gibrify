@@ -2,3 +2,6 @@
 __pycache__/
 *.log
 faiss_index/
+.vs/
+bin/
+obj/

@@ -40,7 +40,7 @@ namespace De_Gibrify
         {
             _notifyIcon = new NotifyIcon
             {
-                Icon = SystemIcons.Keyboard, // Use a standard system icon
+                Icon = SystemIcons.WinLogo, // Use a standard system icon
                 Text = "De-Gibrify",
                 Visible = true
             };
@@ -86,8 +86,8 @@ namespace De_Gibrify
 
             // 3. Get Foreground Window info and Layouts
             IntPtr hwndForeground = NativeMethods.GetForegroundWindow();
-            uint threadId = NativeMethods.GetWindowThreadProcessId(hwndForeground, out _);
-            IntPtr currentLayout = NativeMethods.GetKeyboardLayout(threadId);
+            // Use the global/system keyboard layout instead of the foreground thread layout
+            IntPtr currentLayout = NativeMethods.GetKeyboardLayout(0);
 
             // 4. Determine Next Layout
             IntPtr nextLayout = GetNextKeyboardLayout(currentLayout);
@@ -140,38 +140,35 @@ namespace De_Gibrify
 
         private string? GetClipboardText()
         {
-            for (int i = 0; i < 5; i++)
+            
+            try
             {
-                try
+                if (Clipboard.ContainsText())
                 {
-                    if (Clipboard.ContainsText())
-                    {
-                        return Clipboard.GetText();
-                    }
-                }
-                catch (ExternalException)
-                {
-                    // Clipboard might be locked by another process
-                    Thread.Sleep(50);
+                    return Clipboard.GetText();
                 }
             }
+            catch (ExternalException)
+            {
+                // Clipboard might be locked by another process
+                Thread.Sleep(50);
+            }
+           
             return null;
         }
 
         private void SetClipboardText(string text)
         {
-            for (int i = 0; i < 5; i++)
+           
+            try
             {
-                try
-                {
-                    Clipboard.SetText(text);
-                    return;
-                }
-                catch (ExternalException)
-                {
-                    Thread.Sleep(50);
-                }
+                Clipboard.SetDataObject(text, true);
             }
+            catch (ExternalException)
+            {
+                Thread.Sleep(50);
+            }
+            
         }
 
         private IntPtr GetNextKeyboardLayout(IntPtr currentLayout)
