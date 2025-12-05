@@ -12,6 +12,7 @@ namespace De_Gibrify
  {
  public string Key { get; set; } = "F10";
  public List<string> Modifiers { get; set; } = new List<string> { "Alt" };
+ public List<string> Languages { get; set; } = new List<string> { "en-US", "he-IL" };
 
  [JsonIgnore]
  public static string ConfigPath => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "hotkey.json");

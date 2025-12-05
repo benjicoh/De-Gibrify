@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -27,17 +28,65 @@ namespace De_Gibrify
         private HiddenWindow? _window;
 
         // Hotkey constants (kept for fallback)
-        private const int MOD_ALT =0x0001;
-        private const int VK_F10 =0x79;
-        private const int HOTKEY_ID =9000;
+        private const int MOD_ALT = 0x0001;
+        private const int VK_F10 = 0x79;
+        private const int HOTKEY_ID = 9000;
 
         private HotkeyConfig _hotkeyConfig = new HotkeyConfig();
+        private List<IntPtr> _loadedLayouts = new List<IntPtr>();
 
         public DeGibrifyApplicationContext()
         {
             _hotkeyConfig = HotkeyConfig.LoadOrCreateDefault();
+            LoadConfiguredLayouts();
             SetupTrayIcon();
             RegisterGlobalHotKey();
+        }
+
+        private void LoadConfiguredLayouts()
+        {
+            _loadedLayouts.Clear();
+            if (_hotkeyConfig.Languages == null || _hotkeyConfig.Languages.Count < 2)
+            {
+                // Fallback defaults
+                _hotkeyConfig.Languages = new List<string> { "en-US", "he-IL" };
+            }
+
+            foreach (var lang in _hotkeyConfig.Languages)
+            {
+                try
+                {
+                    IntPtr hkl = LoadLayoutFromCulture(lang);
+                    if (hkl != IntPtr.Zero)
+                    {
+                        _loadedLayouts.Add(hkl);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Failed to load layout for {lang}: {ex.Message}");
+                }
+            }
+
+            if (_loadedLayouts.Count < 2)
+            {
+                MessageBox.Show("Could not load at least 2 keyboard layouts. De-Gibrify might not work correctly.", "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private IntPtr LoadLayoutFromCulture(string cultureName)
+        {
+            try
+            {
+                var culture = new CultureInfo(cultureName);
+                int lcid = culture.LCID;
+                string klid = lcid.ToString("X8");
+                return NativeMethods.LoadKeyboardLayout(klid, NativeMethods.KLF_NOTELLSHELL);
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
         }
 
         private void SetupTrayIcon()
@@ -118,61 +167,79 @@ namespace De_Gibrify
             SendCtrlX();
 
             //2. Wait for Clipboard to update (Wait for the App to actually write the data)
-            // This fixes the issue where we read too early.
-            // If it times out, we assume the cut failed or no selection, but we still try to read once.
             ClipboardHelper.WaitForClipboardUpdate(startSequence);
 
-            //3. Read from Clipboard using robust retry mechanism
+            //3. Read from Clipboard
             string? originalText = ClipboardHelper.GetText();
-            if (string.IsNullOrEmpty(originalText))
+            if (string.IsNullOrEmpty(originalText) || _loadedLayouts.Count < 2)
             {
-                // Nothing selected or copy failed, abort
+                // Nothing selected or copy failed, or not enough layouts
                 return;
             }
 
-            //4. Synchronize Input with Foreground Window
-            IntPtr hwndForeground = NativeMethods.GetForegroundWindow();
-            uint idThreadForeground = NativeMethods.GetWindowThreadProcessId(hwndForeground, out _);
-            uint idThreadSelf = NativeMethods.GetCurrentThreadId();
+            //4. Determine Languages
+            IntPtr sourceLayout, targetLayout;
+            DetectBestLayout(originalText, _loadedLayouts, out sourceLayout, out targetLayout);
 
-            bool attached = false;
-            IntPtr currentLayout = IntPtr.Zero;
-            IntPtr nextLayout = IntPtr.Zero;
-
-            try
-            {
-                if (idThreadForeground != idThreadSelf)
-                {
-                    attached = NativeMethods.AttachThreadInput(idThreadSelf, idThreadForeground, true);
-                }
-
-                currentLayout = NativeMethods.GetKeyboardLayout(idThreadForeground);
-                Debug.WriteLine($"Current Layout: 0x{currentLayout.ToInt64():X}");
-
-                SendWinSpace();
-                await Task.Delay(500);
-                nextLayout = NativeMethods.GetKeyboardLayout(idThreadForeground);
-                Debug.WriteLine($"Next Layout: 0x{nextLayout.ToInt64():X}");
-            }
-            finally
-            {
-                if (attached)
-                {
-                    NativeMethods.AttachThreadInput(idThreadSelf, idThreadForeground, false);
-                }
-            }
+            Debug.WriteLine($"Source Layout: 0x{sourceLayout.ToInt64():X}");
+            Debug.WriteLine($"Target Layout: 0x{targetLayout.ToInt64():X}");
 
             //5. Transform String
-            // We use the layouts we found. Note: TransformString might rely on API calls.
-            // Some API calls like VkKeyScanEx take a HKL. They don't depend on thread state,
-            // so we can do this after detaching.
             Debug.WriteLine($"Transforming {originalText}");
-            string newText = TransformString(originalText, currentLayout, nextLayout);
+            string newText = TransformString(originalText, sourceLayout, targetLayout);
             Debug.WriteLine($"Transformed to {newText}");
+
             //6. Paste Transformed String
             if (ClipboardHelper.SetText(newText))
             {
                 SendCtrlV();
+            }
+
+            //7. Switch Layout for Foreground Window
+            // We use PostMessage to request the language change.
+            IntPtr hwndForeground = NativeMethods.GetForegroundWindow();
+            if (hwndForeground != IntPtr.Zero)
+            {
+                NativeMethods.PostMessage(hwndForeground, NativeMethods.WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, targetLayout);
+            }
+        }
+
+        private void DetectBestLayout(string text, List<IntPtr> layouts, out IntPtr bestSource, out IntPtr bestTarget)
+        {
+            // Default to first two
+            bestSource = layouts[0];
+            bestTarget = layouts[1];
+
+            int bestScore = -1;
+
+            // Score each layout
+            // Score = count of characters that map successfully to a VK on this layout
+            for (int i = 0; i < layouts.Count; i++)
+            {
+                IntPtr layout = layouts[i];
+                int score = 0;
+                foreach (char c in text)
+                {
+                    if (char.IsWhiteSpace(c)) continue; // Ignore spaces for scoring
+                    short scan = NativeMethods.VkKeyScanEx(c, layout);
+                    if (scan != -1)
+                    {
+                        score++;
+                    }
+                }
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestSource = layout;
+                    // Set target to the "other" one.
+                    // Simple logic: if we picked index i, pick index (i+1)%count as target?
+                    // Or specifically if we have 2, pick the other one.
+                    // If we have more than 2, it's ambiguous what the target should be.
+                    // Assuming 2 languages mostly.
+                    int targetIndex = (i + 1) % layouts.Count;
+                    bestTarget = layouts[targetIndex];
+                }
             }
         }
 
@@ -313,6 +380,11 @@ namespace De_Gibrify
 
         [DllImport("user32.dll")]
         public static extern int GetKeyboardLayoutList(int nBuff, [Out] IntPtr[]? lpList);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr LoadKeyboardLayout(string pwszKLID, uint Flags);
+
+        public const uint KLF_NOTELLSHELL = 0x00000080;
 
         [DllImport("user32.dll")]
         public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
