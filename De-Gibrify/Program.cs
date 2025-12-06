@@ -245,36 +245,21 @@ namespace De_Gibrify
 
         private void SendCtrlX()
         {
-            // The user is likely still holding down Alt from the hotkey (Alt+F10).
-            // We must explicitly release Alt (VK_MENU) before sending Ctrl+X.
-            NativeMethods.keybd_event(NativeMethods.VK_MENU,0, NativeMethods.KEYEVENTF_KEYUP,0);
-
             NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0,0,0); // Ctrl Down
             NativeMethods.keybd_event((byte)Keys.X,0,0,0); // X Down
             NativeMethods.keybd_event((byte)Keys.X,0, NativeMethods.KEYEVENTF_KEYUP,0); // X Up
             NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0, NativeMethods.KEYEVENTF_KEYUP,0); // Ctrl Up
 
-            // Sleep is less critical now due to WaitForClipboardUpdate, but good for safety
-            Thread.Sleep(50);
         }
 
         private void SendCtrlV()
         {
-            NativeMethods.keybd_event(NativeMethods.VK_MENU,0, NativeMethods.KEYEVENTF_KEYUP,0);
             NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0,0,0); // Ctrl Down
             NativeMethods.keybd_event((byte)Keys.V,0,0,0); // V Down
             NativeMethods.keybd_event((byte)Keys.V,0, NativeMethods.KEYEVENTF_KEYUP,0); // V Up
             NativeMethods.keybd_event(NativeMethods.VK_CONTROL,0, NativeMethods.KEYEVENTF_KEYUP,0); // Ctrl Up
         }
 
-        //Mimic language switch by win + space
-        private void SendWinSpace()
-        {
-            NativeMethods.keybd_event((byte)Keys.LWin,0,0,0); // Win Down
-            NativeMethods.keybd_event((byte)Keys.Space,0,0,0); // Space Down
-            NativeMethods.keybd_event((byte)Keys.Space,0, NativeMethods.KEYEVENTF_KEYUP,0); // Space Up
-            NativeMethods.keybd_event((byte)Keys.LWin,0, NativeMethods.KEYEVENTF_KEYUP,0); // Win Up
-        }
 
         private string TransformString(string input, IntPtr sourceLayout, IntPtr targetLayout)
         {
